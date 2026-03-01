@@ -1,0 +1,6 @@
+#!/bin/bash
+set -eu
+
+tar -xjf sbcl/sbcl-2.6.2-x86-64-linux-binary.tar.bz2
+cd sbcl-2.6.2-x86-64-linux
+INSTALL_ROOT=$BOSH_INSTALL_TARGET sh install.sh

@@ -25,9 +25,13 @@ bosh -e <director> -d shout deploy \
 - **`templates/bin/post-start`** — Uploads notification rules to the running server via `curl POST /rules` with admin credentials
 - **`templates/config/shout.rules`** — ERB template rendering the `rules` property into the Shout! DSL format
 
+### Package: `sbcl` (`packages/sbcl/`)
+
+Installs a pre-built SBCL binary from [Roswell sbcl_bin](https://github.com/roswell/sbcl_bin/releases). The binary is built with `--fancy` (includes core compression and threading). Currently uses SBCL 2.6.2 for linux x86-64.
+
 ### Package: `shout` (`packages/shout/`)
 
-Copies a precompiled ELF binary from `blobs/shout/shout` into the install target. No compilation step — the binary is stored as a blob.
+Depends on the `sbcl` package. Compiles Shout! from source on the stemcell using SBCL and vendored Quicklisp dependencies. The source is a git archive tarball (`shout/shout-src.tar.gz`) of the [shout repo](https://github.com/cloudfoundry-community/shout) including vendored Quicklisp in `vendor/quicklisp/`.
 
 ### Deployment Manifest (`manifests/shout.yml`)
 
@@ -45,4 +49,26 @@ Single-instance deployment on `ubuntu-noble` stemcell. Takes `slack_webhook` as 
 
 ## Blob Storage
 
-Configured in `config/final.yml` to use S3 bucket `shout-boshrelease`. The Shout! binary blob is registered in `config/blobs.yml`.
+Configured in `config/final.yml` to use S3 bucket `shout-boshrelease`. Blobs are registered in `config/blobs.yml`.
+
+Current blobs:
+- `sbcl/sbcl-2.6.2-x86-64-linux-binary.tar.bz2` — Roswell pre-built SBCL binary
+- `shout/shout-src.tar.gz` — Shout! source (git archive of the shout repo with vendored Quicklisp)
+
+### Updating Blobs
+
+To update the SBCL version, download a new binary from [roswell/sbcl_bin releases](https://github.com/roswell/sbcl_bin/releases) and run:
+```bash
+bosh remove-blob sbcl/sbcl-2.6.2-x86-64-linux-binary.tar.bz2
+bosh add-blob /path/to/sbcl-<version>-x86-64-linux-binary.tar.bz2 sbcl/sbcl-<version>-x86-64-linux-binary.tar.bz2
+```
+Then update the version in `packages/sbcl/spec` and `packages/sbcl/packaging`.
+
+To update the shout source, from the shout repo:
+```bash
+cd shout/
+git archive --format=tar.gz --prefix=shout/ -o /tmp/shout-src.tar.gz HEAD
+cd ../shout-boshrelease/
+bosh remove-blob shout/shout-src.tar.gz
+bosh add-blob /tmp/shout-src.tar.gz shout/shout-src.tar.gz
+```

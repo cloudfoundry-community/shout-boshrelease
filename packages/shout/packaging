@@ -1,5 +1,17 @@
 #!/bin/bash
 set -eu
-mkdir -p $BOSH_INSTALL_TARGET/bin
-cp shout/shout $BOSH_INSTALL_TARGET/bin/shout
-chmod 755 $BOSH_INSTALL_TARGET/bin/shout
+
+export PATH=/var/vcap/packages/sbcl/bin:$PATH
+export SBCL_HOME=/var/vcap/packages/sbcl/lib/sbcl
+
+mkdir -p ${BOSH_INSTALL_TARGET}/bin
+
+tar xzf shout/shout-src.tar.gz
+cd shout
+
+# Compile shout using vendored Quicklisp
+sbcl --no-sysinit --no-userinit \
+  --load vendor/quicklisp/setup.lisp \
+  --eval '(push (truename ".") asdf:*central-registry*)' \
+  --eval '(asdf:load-system :shout)' \
+  --eval "(sb-ext:save-lisp-and-die \"${BOSH_INSTALL_TARGET}/bin/shout\" :compression t :executable t :toplevel #'shout:shout)"

@@ -1,0 +1,5 @@
+---
+name: sbcl
+dependencies: []
+files:
+  - sbcl/sbcl-2.6.2-x86-64-linux-binary.tar.bz2

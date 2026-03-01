@@ -1,5 +1,6 @@
 ---
 name: shout
-dependencies: []
+dependencies:
+  - sbcl
 files:
-  - shout/shout
+  - shout/shout-src.tar.gz
