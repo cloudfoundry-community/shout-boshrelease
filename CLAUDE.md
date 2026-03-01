@@ -9,10 +9,21 @@ A **BOSH release** that packages the [Shout!](https://github.com/cloudfoundry-co
 ## Commands
 
 ```bash
-bosh create-release                    # Create a dev release
+make sbcl-blob      # Download Roswell SBCL binary and add as blob
+make shout-blob     # Create shout source tarball (git archive) and add as blob
+make blobs          # Both of the above
+make upload-blobs   # Upload blobs to S3 blobstore
+make release        # Create a BOSH dev release
+
 bosh -e <director> -d shout deploy \
      -v slack_webhook=https://...  \
-     manifests/shout.yml               # Deploy to BOSH director
+     manifests/shout.yml           # Deploy to BOSH director
+```
+
+The `SBCL_VERSION` (default 2.6.2) and `SHOUT_REPO` (default `../shout`) variables can be overridden:
+```bash
+make sbcl-blob SBCL_VERSION=2.6.3
+make shout-blob SHOUT_REPO=/path/to/shout
 ```
 
 ## BOSH Release Structure
@@ -57,18 +68,8 @@ Current blobs:
 
 ### Updating Blobs
 
-To update the SBCL version, download a new binary from [roswell/sbcl_bin releases](https://github.com/roswell/sbcl_bin/releases) and run:
-```bash
-bosh remove-blob sbcl/sbcl-2.6.2-x86-64-linux-binary.tar.bz2
-bosh add-blob /path/to/sbcl-<version>-x86-64-linux-binary.tar.bz2 sbcl/sbcl-<version>-x86-64-linux-binary.tar.bz2
-```
-Then update the version in `packages/sbcl/spec` and `packages/sbcl/packaging`.
+Use the Makefile targets to update blobs. To change the SBCL version, update `SBCL_VERSION` in the Makefile and in `packages/sbcl/spec` and `packages/sbcl/packaging`, then run `make sbcl-blob`.
 
-To update the shout source, from the shout repo:
-```bash
-cd shout/
-git archive --format=tar.gz --prefix=shout/ -o /tmp/shout-src.tar.gz HEAD
-cd ../shout-boshrelease/
-bosh remove-blob shout/shout-src.tar.gz
-bosh add-blob /tmp/shout-src.tar.gz shout/shout-src.tar.gz
-```
+To refresh the shout source after code changes: `make shout-blob`
+
+After updating blobs: `make upload-blobs` to push to S3.
