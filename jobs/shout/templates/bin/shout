@@ -22,6 +22,11 @@ case $1 in
     export SHOUT_LOG_LEVEL="<%= p('log-level') %>"
     export SHOUT_OPS_CREDS="<%= p('ops.username') %>:<%= p('ops.password') %>"
     export SHOUT_ADMIN_CREDS="<%= p('admin.username') %>:<%= p('admin.password') %>"
+<% if p('tls.certificate') != "" && p('tls.key') != "" %>
+    export SHOUT_TLS_CERT="/var/vcap/jobs/shout/config/tls.crt"
+    export SHOUT_TLS_KEY="/var/vcap/jobs/shout/config/tls.key"
+    chmod 600 /var/vcap/jobs/shout/config/tls.key
+<% end %>
 
     mkdir -p $(dirname $SHOUT_DATABASE)
     chown -R vcap:vcap $(dirname $SHOUT_DATABASE)

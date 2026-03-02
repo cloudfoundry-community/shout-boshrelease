@@ -7,6 +7,8 @@ templates:
   bin/shout:          bin/shout
   bin/post-start:     bin/post-start
   config/shout.rules: config/shout.rules
+  config/tls.crt:     config/tls.crt
+  config/tls.key:     config/tls.key
 
 properties:
   port:
@@ -30,6 +32,13 @@ properties:
   admin.password:
     description: The password to require for administrative access to the Shout! API
     default: sadmin
+
+  tls.certificate:
+    description: PEM-encoded TLS certificate. When set with tls.key, Shout! serves HTTPS instead of HTTP.
+    default: ""
+  tls.key:
+    description: PEM-encoded TLS private key. When set with tls.certificate, Shout! serves HTTPS instead of HTTP.
+    default: ""
 
   rules:
     description: The Shout! notification dispatch rules.
