@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#
+# Build the Shout! Go server as a static linux/amd64 binary and register it
+# as the shout/shout-linux-amd64 blob of this release.
+#
+# Environment:
+#   SHOUT_REPO     path to a checkout of github.com/cloudfoundry-community/shout
+#                  (required)
+#   SHOUT_VERSION  semantic version stamped into the binary, for example
+#                  1.0.0 or 0.1.0-dev (default: 0.1.0-dev)
+#   ALLOW_DIRTY    set to 1 to build from a checkout with uncommitted changes
+#
+set -euo pipefail
+
+die() { echo "build-shout-blob: $*" >&2; exit 1; }
+
+release_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+blob_path=shout/shout-linux-amd64
+module=github.com/cloudfoundry-community/shout
+verpkg=${module}/pkg/version
+
+: "${SHOUT_REPO:?set SHOUT_REPO to a checkout of the shout Go source}"
+SHOUT_VERSION=${SHOUT_VERSION:-0.1.0-dev}
+
+command -v go   >/dev/null 2>&1 || die "go is not on the PATH"
+command -v git  >/dev/null 2>&1 || die "git is not on the PATH"
+command -v bosh >/dev/null 2>&1 || die "bosh is not on the PATH"
+
+[[ -d $SHOUT_REPO ]] || die "SHOUT_REPO '$SHOUT_REPO' is not a directory"
+repo=$(cd "$SHOUT_REPO" && pwd)
+[[ -f $repo/go.mod ]] || die "$repo has no go.mod; point SHOUT_REPO at the Go source root"
+grep -qx "module ${module}" "$repo/go.mod" \
+  || die "$repo/go.mod does not declare module ${module}"
+[[ -f $repo/cmd/shout/main.go ]] || die "$repo has no cmd/shout/main.go"
+
+semver_re='^([0-9]+)\.([0-9]+)\.([0-9]+)(-([0-9A-Za-z.-]+))?(\+([0-9A-Za-z.-]+))?$'
+[[ $SHOUT_VERSION =~ $semver_re ]] \
+  || die "SHOUT_VERSION '$SHOUT_VERSION' is not a semantic version such as 1.2.3 or 1.2.3-rc.1"
+major=${BASH_REMATCH[1]}
+minor=${BASH_REMATCH[2]}
+patch=${BASH_REMATCH[3]}
+prerelease=${BASH_REMATCH[5]}
+buildmeta=${BASH_REMATCH[7]}
+
+git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 || die "$repo is not a git checkout with a commit"
+if [[ -n $(git -C "$repo" status --porcelain --untracked-files=no) && ${ALLOW_DIRTY:-0} != 1 ]]; then
+  die "$repo has uncommitted changes, so the stamped commit would not match the binary (set ALLOW_DIRTY=1 to override)"
+fi
+
+vcs_id=$(git -C "$repo" log -n 1 --format=%h)
+vcs_date=$(TZ=UTC0 git -C "$repo" log -n 1 --date=iso-strict-local --format=%cd)
+vcs_url=$(git -C "$repo" config --get remote.origin.url || true)
+# The build date is the commit date so that rebuilding one commit with one
+# Go toolchain produces a byte-identical blob.
+build_date=$vcs_date
+
+workdir=$(mktemp -d "${TMPDIR:-/tmp}/shout-blob.XXXXXX")
+trap 'rm -rf "$workdir"' EXIT
+binary=$workdir/shout-linux-amd64
+
+ldflags="-s -w"
+ldflags+=" -X '${verpkg}.SemVerMajor=${major}'"
+ldflags+=" -X '${verpkg}.SemVerMinor=${minor}'"
+ldflags+=" -X '${verpkg}.SemVerPatch=${patch}'"
+ldflags+=" -X '${verpkg}.SemVerPrerelease=${prerelease}'"
+ldflags+=" -X '${verpkg}.SemVerBuild=${buildmeta}'"
+ldflags+=" -X '${verpkg}.BuildDate=${build_date}'"
+ldflags+=" -X '${verpkg}.BuildVcsUrl=${vcs_url}'"
+ldflags+=" -X '${verpkg}.BuildVcsId=${vcs_id}'"
+ldflags+=" -X '${verpkg}.BuildVcsIdDate=${vcs_date}'"
+
+echo "building shout ${SHOUT_VERSION} (${vcs_id}) for linux/amd64 with $(go version | awk '{print $3}')"
+(
+  cd "$repo"
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS='' \
+    go build -trimpath -buildvcs=false -ldflags="$ldflags" -o "$binary" ./cmd/shout
+)
+
+# Confirm that the toolchain produced what the packaging script expects.
+buildinfo=$(go version -m "$binary")
+grep -q $'\tbuild\tCGO_ENABLED=0$' <<<"$buildinfo" || die "built binary is not a CGO_ENABLED=0 build"
+grep -q $'\tbuild\tGOOS=linux$'    <<<"$buildinfo" || die "built binary is not a linux binary"
+grep -q $'\tbuild\tGOARCH=amd64$'  <<<"$buildinfo" || die "built binary is not an amd64 binary"
+grep -q $'\tbuild\t-trimpath=true$' <<<"$buildinfo" || die "built binary was not built with -trimpath"
+
+cd "$release_dir"
+bosh add-blob "$binary" "$blob_path"
+echo "added ${blob_path} ($(wc -c <"$binary" | tr -d ' ') bytes)"

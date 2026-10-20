@@ -1,12 +1,3 @@
-sbcl/sbcl-2.6.2-x86-64-linux-binary.tar.bz2:
-  size: 15402229
-  object_id: 00094e8b-a266-4222-60b3-b9a85f59490b
-  sha: sha256:09335e6d0b2d077281b19384099775c00bb02f9d5d2d0f293958e82526a5cbb5
-shout/shout:
-  size: 19169328
-  object_id: a6ce665c-ae14-4598-61ff-4c431bcd6acc
-  sha: 0950ebc9a737e98b50af3af506b308f37e203c6d
-shout/shout-src.tar.gz:
-  size: 8062902
-  object_id: 979e4549-f0fa-404a-4ebf-e1f6bac83c7b
-  sha: sha256:53021559f42c992358478b3ea7673878f778a2f025ca59890300da8a7a3b0265
+shout/shout-linux-amd64:
+  size: 10793120
+  sha: sha256:f71ee419e2bce7d9c023037560123945837804c11604e0cff60558209ee865b8

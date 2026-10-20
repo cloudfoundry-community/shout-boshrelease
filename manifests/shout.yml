@@ -7,20 +7,38 @@ instance_groups:
   stemcell: default
   azs: [z1]
   networks: [{name: default}]
+  persistent_disk: 1024
 
   jobs:
   - name: shout
     release: shout
     properties:
-      rules: |
-        ((set webhook "...")
-         (for *
-              (when *
-                (remind 24 hours)
-                (slack :webhook (value webhook)
-                       :text "$topic is $status"
-                       :color (if ok? "good" "danger")
-                       :attach (if link "$message <$link>" "$message")))))
+      ops:
+        username: ops
+        password: ((shout_ops_password))
+      admin:
+        username: admin
+        password: ((shout_admin_password))
+      rules:
+        vars:
+          webhook: ((slack_webhook))
+        rules:
+        - for: "*"
+          when:
+          - match: "*"
+            remind: 24h
+            do:
+            - slack:
+                webhook: "{{ .Vars.webhook }}"
+                text:    "{{ .Topic }} is {{ .Status }}"
+                color:   '{{ if .OK }}good{{ else }}danger{{ end }}'
+                attach:  '{{ if .Link }}{{ .Message }} <{{ .Link }}>{{ else }}{{ .Message }}{{ end }}'
+
+variables:
+- name: shout_ops_password
+  type: password
+- name: shout_admin_password
+  type: password
 
 update:
   canaries: 1
@@ -31,11 +49,11 @@ update:
 
 stemcells:
 - alias: default
+  # The binary is static, so ubuntu-jammy, ubuntu-noble, and ubuntu-resolute
+  # stemcells all work.
   os: ubuntu-noble
   version: latest
 
 releases:
 - name: shout
   version: latest
-  #url:  ...
-  #sha1: ...

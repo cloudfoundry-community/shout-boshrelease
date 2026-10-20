@@ -1,0 +1,74 @@
+<%
+  require 'shellwords'
+
+  integer_in = lambda do |name, min, max|
+    value = p(name)
+    value = value.strip if value.is_a?(String)
+    unless value.is_a?(Integer) || (value.is_a?(String) && value =~ /\A[0-9]+\z/)
+      raise "#{name} must be an integer, got #{value.inspect}"
+    end
+    value = value.to_i
+    if max.nil? && value < min
+      raise "#{name} must be at least #{min}, got #{value}"
+    elsif max && (value < min || value > max)
+      raise "#{name} must be between #{min} and #{max}, got #{value}"
+    end
+    value
+  end
+
+  credentials = lambda do |role|
+    username = p("#{role}.username").to_s
+    password = p("#{role}.password").to_s
+    raise "#{role}.username must not be empty" if username.empty?
+    raise "#{role}.username must not contain a colon, because Shout! splits user:pass at the first colon" if username.include?(':')
+    raise "#{role}.password must not be empty" if password.empty?
+    "#{username}:#{password}"
+  end
+
+  port   = integer_in.call('port', 1024, 65535)
+  expiry = integer_in.call('expiry', 0, nil)
+
+  tls_cert = p('tls.certificate').to_s.strip
+  tls_key  = p('tls.key').to_s.strip
+  if tls_cert.empty? != tls_key.empty?
+    raise "tls.certificate and tls.key must be set together; only #{tls_cert.empty? ? 'tls.key' : 'tls.certificate'} is set"
+  end
+  tls = !tls_cert.empty?
+  if tls
+    raise "tls.certificate is not a PEM-encoded certificate" unless tls_cert.include?('-----BEGIN CERTIFICATE-----')
+    raise "tls.key is not a PEM-encoded private key" unless tls_key =~ /-----BEGIN [A-Z ]*PRIVATE KEY-----/
+  end
+
+  smtp_host = p('email.smtp_host').to_s.strip
+  raise "email.smtp_host must not be empty" if smtp_host.empty?
+  raise "email.smtp_host must not contain whitespace" if smtp_host =~ /\s/
+  smtp_port = integer_in.call('email.smtp_port', 1, 65535)
+  email_from = p('email.from').to_s.strip
+  raise "email.from must not be empty" if email_from.empty?
+
+  slack_token   = p('slack_app.token').to_s.strip
+  slack_channel = p('slack_app.channel').to_s.strip
+
+  q = lambda { |v| Shellwords.escape(v.to_s) }
+-%>
+# Environment for the Shout! server.  bin/ctl sources this file as root and
+# restricts it to root before doing so, because it carries credentials.
+export SHOUT_PORT=<%= q.call(port) %>
+export SHOUT_DATABASE=/var/vcap/store/shout/shout.db
+export SHOUT_RULES=/var/vcap/jobs/shout/config/rules.yml
+export SHOUT_EXPIRY=<%= q.call(expiry) %>
+export SHOUT_OPS_AUTH=<%= q.call(credentials.call('ops')) %>
+export SHOUT_ADMIN_AUTH=<%= q.call(credentials.call('admin')) %>
+export SHOUT_SMTP_HOST=<%= q.call(smtp_host) %>
+export SHOUT_SMTP_PORT=<%= q.call(smtp_port) %>
+export SHOUT_EMAIL_FROM=<%= q.call(email_from) %>
+<% if tls -%>
+export SHOUT_TLS_CERT=/var/vcap/jobs/shout/config/tls.crt
+export SHOUT_TLS_KEY=/var/vcap/jobs/shout/config/tls.key
+<% end -%>
+<% unless slack_token.empty? -%>
+export SHOUT_SLACK_TOKEN=<%= q.call(slack_token) %>
+<% end -%>
+<% unless slack_channel.empty? -%>
+export SHOUT_SLACK_CHANNEL=<%= q.call(slack_channel) %>
+<% end -%>

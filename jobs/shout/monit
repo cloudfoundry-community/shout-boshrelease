@@ -1,5 +1,5 @@
 check process shout
   with pidfile /var/vcap/sys/run/shout/shout.pid
-  start program "/var/vcap/jobs/shout/bin/shout start"
-  stop program  "/var/vcap/jobs/shout/bin/shout stop"
+  start program "/var/vcap/jobs/shout/bin/ctl start"
+  stop program  "/var/vcap/jobs/shout/bin/ctl stop"
   group vcap

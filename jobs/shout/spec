@@ -1,44 +1,96 @@
 ---
 name: shout
+description: |
+  Runs the Shout! notifications gateway, a Go server that tracks break/fix
+  state per topic and dispatches notifications according to a YAML rules file.
+
 packages:
   - shout
 
 templates:
-  bin/shout:          bin/shout
+  bin/ctl:            bin/ctl
   bin/post-start:     bin/post-start
-  config/shout.rules: config/shout.rules
+  config/env:         config/env
+  config/rules.yml:   config/rules.yml
   config/tls.crt:     config/tls.crt
   config/tls.key:     config/tls.key
 
 properties:
   port:
-    description: The TCP port to bind for incoming Shout! API requests.
+    description: |
+      The TCP port to bind for incoming Shout! API requests.  The server runs
+      as vcap, so the port must be 1024 or higher.
     default: 7109
 
-  log-level:
-    description: How verbose should Shout! be in its logs?  Must be one of "none", "info", or "debug".
-    default: info
-
   ops.username:
-    description: The username to use for operational access to the Shout! API
+    description: |
+      The username for operational access to the Shout! API (POST /events,
+      POST /announcements, GET /state, and GET /states).  It must not contain
+      a colon.
     default: shouty
   ops.password:
-    description: The password to require for operational access to the Shout! API
-    default: abouty
+    description: The password for operational access to the Shout! API.
 
   admin.username:
-    description: The username to use for administrative access to the Shout! API
+    description: |
+      The username for administrative access to the Shout! API (GET /rules
+      and POST /rules).  It must not contain a colon.
     default: admin
   admin.password:
-    description: The password to require for administrative access to the Shout! API
-    default: sadmin
+    description: The password for administrative access to the Shout! API.
+
+  expiry:
+    description: |
+      How many seconds a topic's state is kept after its last event before
+      Shout! forgets it.  Set it to 0 to keep topic state forever.
+    default: 86400
+
+  startup_timeout:
+    description: |
+      How many seconds the post-start script waits for the API to answer on
+      GET /info before it fails the deploy.
+    default: 60
 
   tls.certificate:
-    description: PEM-encoded TLS certificate. When set with tls.key, Shout! serves HTTPS instead of HTTP.
+    description: |
+      PEM-encoded TLS certificate.  When it is set together with tls.key,
+      Shout! serves HTTPS instead of HTTP.
     default: ""
   tls.key:
-    description: PEM-encoded TLS private key. When set with tls.certificate, Shout! serves HTTPS instead of HTTP.
+    description: |
+      PEM-encoded TLS private key.  When it is set together with
+      tls.certificate, Shout! serves HTTPS instead of HTTP.
+    default: ""
+
+  email.smtp_host:
+    description: The SMTP relay that the email handler delivers through.
+    default: localhost
+  email.smtp_port:
+    description: The TCP port of the SMTP relay.
+    default: 25
+  email.from:
+    description: The From address that the email handler puts on every message.
+    default: shout@localhost
+
+  slack_app.token:
+    description: |
+      Default Slack bot token for the slack-app handler.  A rule's own token
+      argument overrides it.  Leave it empty to require the token in the rules.
+    default: ""
+  slack_app.channel:
+    description: |
+      Default Slack channel for the slack-app handler.  A rule's own channel
+      argument overrides it.  Leave it empty to require the channel in the rules.
     default: ""
 
   rules:
-    description: The Shout! notification dispatch rules.
+    description: |
+      The Shout! notification rules in the YAML format of the Go server.  It
+      takes either a string of YAML or the same structure as a map, with a
+      top-level `rules` list and an optional `vars` map.  Each rule has a
+      `for` topic pattern and a `when` list, each `when` clause has an
+      optional `match` expression, an optional `remind` duration, and a `do`
+      list of handler actions (slack, slack-app, webhook, or email).
+      Templates use the fields .Topic, .OK, .Status, .Message, .Link, .Meta,
+      and .Vars.  The rules are validated when the job renders and compiled
+      when the server starts.

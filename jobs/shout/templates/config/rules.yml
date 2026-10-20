@@ -1,0 +1,150 @@
+<%
+  require 'yaml'
+
+  # The Go server compiles these rules when it starts and refuses to run if
+  # they do not compile.  The checks below catch the mistakes it would only
+  # report at start-up, plus the ones it would never report: unknown keys,
+  # which it ignores, and template fields that do not exist, which only fail
+  # when a notification is sent.  Error messages name the offending path and
+  # never echo values, because rules often carry webhook URLs and tokens.
+
+  handlers = {
+    'slack'     => %w[webhook],
+    'slack-app' => [],
+    'webhook'   => %w[url],
+    'email'     => %w[to],
+  }
+  template_fields = %w[Topic OK Status Message Link Meta Vars]
+  duration_re = /\A([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+\z/
+  slack_app_defaults = {
+    'token'   => !p('slack_app.token').to_s.strip.empty?,
+    'channel' => !p('slack_app.channel').to_s.strip.empty?,
+  }
+
+  fail_rules = lambda { |path, msg| raise "rules: #{path}: #{msg}" }
+
+  check_keys = lambda do |hash, path, allowed|
+    unknown = hash.keys.map(&:to_s) - allowed
+    unless unknown.empty?
+      fail_rules.call(path, "unknown key(s) #{unknown.sort.join(', ')}; allowed keys are #{allowed.join(', ')}")
+    end
+  end
+
+  check_template = lambda do |text, path|
+    text.scan(/\{\{(.*?)\}\}/m).each do |(action)|
+      next if action =~ /\A-?\s*\/\*/
+      # Drop quoted strings so that dots inside them are not read as fields.
+      stripped = action.gsub(/"(?:\\.|[^"\\])*"|`[^`]*`|'(?:\\.|[^'\\])*'/, '""')
+      stripped.scan(/(?:\A|[\s(|,])\.([A-Za-z_][A-Za-z0-9_]*)/).each do |(field)|
+        next if template_fields.include?(field)
+        hint = template_fields.find { |f| f.downcase == field.downcase }
+        fail_rules.call(path, "template refers to .#{field}, which is not a field" +
+          (hint ? "; use .#{hint} instead" : "; fields are #{template_fields.map { |f| ".#{f}" }.join(', ')}"))
+      end
+    end
+  end
+
+  check_regex = lambda do |pattern, path|
+    begin
+      Regexp.new(pattern)
+    rescue RegexpError => e
+      fail_rules.call(path, "invalid regular expression (#{e.message.split(':').first})")
+    end
+    if pattern =~ /\(\?<?[=!]/ || pattern =~ /\\[1-9]/
+      fail_rules.call(path, "lookaround and backreferences are not supported by Go regular expressions")
+    end
+  end
+
+  raw = p('rules')
+  if raw.is_a?(String) && raw.lstrip.start_with?('(')
+    raise "rules: the Lisp rules DSL is no longer supported; rewrite the rules in the YAML format of the Go server"
+  end
+  rules =
+    case raw
+    when String
+      begin
+        YAML.safe_load(raw, aliases: false)
+      rescue Psych::Exception => e
+        line = e.respond_to?(:line) ? " at line #{e.line}" : ''
+        raise "rules: could not be loaded as plain YAML#{line} (#{e.class.name.split('::').last})"
+      end
+    when Hash
+      raw
+    else
+      raise "rules must be a YAML string or a map, got #{raw.class}"
+    end
+
+  raise "rules: the top level must be a map with a rules list, got #{rules.class}" unless rules.is_a?(Hash)
+  check_keys.call(rules, 'rules', %w[vars rules])
+
+  vars = rules['vars']
+  unless vars.nil? || vars.is_a?(Hash)
+    fail_rules.call('vars', "must be a map, got #{vars.class}")
+  end
+
+  list = rules['rules']
+  fail_rules.call('rules', 'is missing; set it to a list, which may be empty') unless rules.key?('rules')
+  fail_rules.call('rules', "must be a list, got #{list.class}") unless list.is_a?(Array)
+
+  list.each_with_index do |rule, i|
+    rpath = "rules[#{i}]"
+    fail_rules.call(rpath, "must be a map with for and when keys, got #{rule.class}") unless rule.is_a?(Hash)
+    check_keys.call(rule, rpath, %w[for when])
+
+    topic = rule['for']
+    fail_rules.call("#{rpath}.for", 'must be a non-empty string') unless topic.is_a?(String) && !topic.strip.empty?
+    check_regex.call(topic.sub(/\Are:/, ''), "#{rpath}.for") if topic.start_with?('re:')
+
+    whens = rule['when']
+    fail_rules.call("#{rpath}.when", 'must be a non-empty list') unless whens.is_a?(Array) && !whens.empty?
+
+    whens.each_with_index do |w, j|
+      wpath = "#{rpath}.when[#{j}]"
+      fail_rules.call(wpath, "must be a map with match, remind, and do keys, got #{w.class}") unless w.is_a?(Hash)
+      check_keys.call(w, wpath, %w[match remind do])
+
+      if w.key?('match') && !w['match'].nil? && !w['match'].is_a?(String)
+        fail_rules.call("#{wpath}.match", "must be a string expression or \"*\", got #{w['match'].class}")
+      end
+
+      if w.key?('remind') && !w['remind'].nil?
+        remind = w['remind']
+        unless remind.is_a?(String) && remind =~ duration_re
+          fail_rules.call("#{wpath}.remind", 'must be a Go duration with a unit, such as 30m, 4h, or 1h30m')
+        end
+      end
+
+      actions = w['do']
+      fail_rules.call("#{wpath}.do", 'must be a list of actions') unless actions.is_a?(Array)
+
+      actions.each_with_index do |action, k|
+        apath = "#{wpath}.do[#{k}]"
+        unless action.is_a?(Hash) && !action.empty?
+          fail_rules.call(apath, 'must be a map from a handler name to its arguments')
+        end
+        action.each do |handler, args|
+          handler = handler.to_s
+          hpath = "#{apath}.#{handler}"
+          unless handlers.key?(handler)
+            fail_rules.call(hpath, "unknown handler; handlers are #{handlers.keys.join(', ')}")
+          end
+          fail_rules.call(hpath, 'must be a map of arguments') unless args.is_a?(Hash)
+          args.each do |name, value|
+            unless value.is_a?(String) || value.is_a?(Numeric) || value == true || value == false
+              fail_rules.call("#{hpath}.#{name}", "must be a string, got #{value.class}")
+            end
+            check_template.call(value, "#{hpath}.#{name}") if value.is_a?(String)
+          end
+          required = handlers[handler].dup
+          required << 'token'   if handler == 'slack-app' && !slack_app_defaults['token']
+          required << 'channel' if handler == 'slack-app' && !slack_app_defaults['channel']
+          missing = required.reject { |r| args.key?(r) && !args[r].to_s.strip.empty? }
+          unless missing.empty?
+            fail_rules.call(hpath, "is missing required argument(s) #{missing.join(', ')}")
+          end
+        end
+      end
+    end
+  end
+-%>
+<%= raw.is_a?(String) ? raw : YAML.dump(rules) %>

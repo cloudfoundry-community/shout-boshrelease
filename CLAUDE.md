@@ -4,72 +4,59 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-A **BOSH release** that packages the [Shout!](https://github.com/cloudfoundry-community/shout) notifications gateway for deployment on Cloud Foundry infrastructure.
+A **BOSH release** that packages the Go version of the [Shout!](https://github.com/cloudfoundry-community/shout) notifications gateway as a static linux/amd64 binary.
 
 ## Commands
 
 ```bash
-make sbcl-blob      # Download Roswell SBCL binary and add as blob
-make shout-blob     # Create shout source tarball (git archive) and add as blob
-make blobs          # Both of the above
-make upload-blobs   # Upload blobs to S3 blobstore
-make release        # Create a BOSH dev release
+make shout-blob SHOUT_REPO=/path/to/shout SHOUT_VERSION=0.1.0-dev  # build the binary and add it as a blob
+make spec           # run the rspec job template tests
+make upload-blobs   # upload blobs to the S3 blobstore
+make release        # create a BOSH dev release
 
 bosh -e <director> -d shout deploy \
      -v slack_webhook=https://...  \
-     manifests/shout.yml           # Deploy to BOSH director
+     manifests/shout.yml
 ```
 
-The `SBCL_VERSION` (default 2.6.2) and `SHOUT_REPO` (default `../shout`) variables can be overridden:
-```bash
-make sbcl-blob SBCL_VERSION=2.6.3
-make shout-blob SHOUT_REPO=/path/to/shout
-```
+`scripts/build-shout-blob` does the work behind `make shout-blob`. It refuses a source checkout with uncommitted changes unless `ALLOW_DIRTY=1` is set, builds with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath`, stamps the version and commit into `pkg/version` through `-ldflags`, and uses the commit date as the build date so that the blob is reproducible.
 
 ## BOSH Release Structure
 
-### Job: `shout` (`jobs/shout/`)
-
-- **`spec`** — Job properties schema: `port` (default 7109), `log-level`, `ops.username`/`ops.password`, `admin.username`/`admin.password`, `rules`
-- **`monit`** — Process monitoring via pidfile
-- **`templates/bin/shout`** — Start/stop script. Sets env vars (`SHOUT_PORT`, `SHOUT_DATABASE`, `SHOUT_OPS_CREDS`, `SHOUT_ADMIN_CREDS`, `SHOUT_LOG_LEVEL`), runs as `vcap:vcap` via `chpst`, stores DB at `/var/vcap/store/shout/shout.db`
-- **`templates/bin/post-start`** — Uploads notification rules to the running server via `curl POST /rules` with admin credentials
-- **`templates/config/shout.rules`** — ERB template rendering the `rules` property into the Shout! DSL format
-
-### Package: `sbcl` (`packages/sbcl/`)
-
-Installs a pre-built SBCL binary from [Roswell sbcl_bin](https://github.com/roswell/sbcl_bin/releases). The binary is built with `--fancy` (includes core compression and threading). Currently uses SBCL 2.6.2 for linux x86-64.
-
 ### Package: `shout` (`packages/shout/`)
 
-Depends on the `sbcl` package. Compiles Shout! from source on the stemcell using SBCL and vendored Quicklisp dependencies. The source is a git archive tarball (`shout/shout-src.tar.gz`) of the [shout repo](https://github.com/cloudfoundry-community/shout) including vendored Quicklisp in `vendor/quicklisp/`.
+Installs the `shout/shout-linux-amd64` blob as `bin/shout` and runs `shout -version` to prove that it runs on the stemcell. It has no dependencies.
 
-### Deployment Manifest (`manifests/shout.yml`)
+### Job: `shout` (`jobs/shout/`)
 
-Single-instance deployment on `ubuntu-noble` stemcell. Takes `slack_webhook` as a deployment variable. Includes default notification rules that send all break/fix events to Slack with 24-hour reminders.
+- **`spec`** lists the properties, which are `port`, `ops.*`, `admin.*`, `expiry`, `startup_timeout`, `tls.*`, `email.*`, `slack_app.*`, and `rules`.
+
+- **`monit`** watches the pidfile that `bin/ctl` writes.
+
+- **`templates/bin/ctl`** prepares the store and file permissions, sources `config/env`, and execs the server through `setpriv --reuid=vcap --regid=vcap --init-groups --no-new-privs`. Never use `chpst`, because ubuntu-resolute stemcells do not ship runit. It moves a Lisp-era or empty state file aside, because the Go server refuses to start on one.
+
+- **`templates/bin/post-start`** waits for `GET /info` to answer.
+
+- **`templates/config/env`** renders the `SHOUT_*` environment variables, with every value shell-quoted, and validates ports, credentials, and TLS.
+
+- **`templates/config/rules.yml`** validates the YAML rules and renders them. Its error messages must never echo rule values, because rules carry webhook URLs and tokens.
+
+### Tests (`spec/`)
+
+`spec/shout_job_spec.rb` renders every template with `bosh-template` and checks both the output and the validation errors.
 
 ## Key Paths on Deployed VMs
 
 | Path | Purpose |
 |------|---------|
 | `/var/vcap/packages/shout/bin/shout` | Shout! binary |
-| `/var/vcap/jobs/shout/config/shout.rules` | Notification rules |
-| `/var/vcap/store/shout/shout.db` | Persistent state database |
-| `/var/vcap/sys/log/shout/shout.log` | Log output |
+| `/var/vcap/jobs/shout/config/rules.yml` | Notification rules, loaded at start |
+| `/var/vcap/jobs/shout/config/env` | Server environment, root-only |
+| `/var/vcap/store/shout/shout.db` | Persistent state, saved once a minute |
+| `/var/vcap/sys/log/shout/shout.log` | Server output |
+| `/var/vcap/sys/log/shout/ctl.log` | Start and stop messages |
 | `/var/vcap/sys/run/shout/shout.pid` | PID file |
 
 ## Blob Storage
 
-Configured in `config/final.yml` to use S3 bucket `shout-boshrelease`. Blobs are registered in `config/blobs.yml`.
-
-Current blobs:
-- `sbcl/sbcl-2.6.2-x86-64-linux-binary.tar.bz2` — Roswell pre-built SBCL binary
-- `shout/shout-src.tar.gz` — Shout! source (git archive of the shout repo with vendored Quicklisp)
-
-### Updating Blobs
-
-Use the Makefile targets to update blobs. To change the SBCL version, update `SBCL_VERSION` in the Makefile and in `packages/sbcl/spec` and `packages/sbcl/packaging`, then run `make sbcl-blob`.
-
-To refresh the shout source after code changes: `make shout-blob`
-
-After updating blobs: `make upload-blobs` to push to S3.
+`config/final.yml` points at the S3 bucket `shout-boshrelease`, and `config/blobs.yml` registers the single blob `shout/shout-linux-amd64`. After updating it, `make upload-blobs` pushes it to S3, which needs `config/private.yml`.

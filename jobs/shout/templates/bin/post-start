@@ -1,19 +1,32 @@
 #!/bin/bash
-set -u
+set -euo pipefail
+<%
+  timeout = p('startup_timeout')
+  timeout = timeout.strip if timeout.is_a?(String)
+  unless timeout.is_a?(Integer) || (timeout.is_a?(String) && timeout =~ /\A[0-9]+\z/)
+    raise "startup_timeout must be an integer number of seconds, got #{timeout.inspect}"
+  end
+  timeout = timeout.to_i
+  raise "startup_timeout must be at least 1 second" if timeout < 1
+  scheme = p('tls.certificate').to_s.strip.empty? ? 'http' : 'https'
+-%>
 
-<% if p('tls.certificate') != "" && p('tls.key') != ""
-     scheme = "https"
-   else
-     scheme = "http"
-   end %>
-echo "[$(date)] uploading rules to Shout!"
-curl --fail -Lv -k -u "<%= p('admin.username') %>:<%= p('admin.password') %>" \
-  -X POST --data-binary @/var/vcap/jobs/shout/config/shout.rules \
-  <%= scheme %>://127.0.0.1:<%= p('port') %>/rules
+# The server loads and compiles the rules when it starts, so a server that
+# answers GET /info is running with a valid rule set.  -k is used only for this
+# loopback health check, because the certificate names the service address and
+# not 127.0.0.1.
+url=<%= scheme %>://127.0.0.1:<%= p('port') %>/info
+deadline=$((SECONDS + <%= timeout %>))
 
-if [[ $? != 0 ]]; then
-	echo "[$(date)] failed to upload rules to Shout!; check the syntax of your rules file..."
-	exit $?
-fi
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] waiting up to <%= timeout %>s for Shout! at ${url}"
+while ((SECONDS < deadline)); do
+  if curl --silent --show-error --fail --insecure --max-time 5 --output /dev/null "$url" 2>/dev/null; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Shout! is answering"
+    exit 0
+  fi
+  sleep 1
+done
 
-exit 0
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Shout! did not answer within <%= timeout %>s." >&2
+echo "If the rules failed to compile, the reason is in /var/vcap/sys/log/shout/shout.log." >&2
+exit 1

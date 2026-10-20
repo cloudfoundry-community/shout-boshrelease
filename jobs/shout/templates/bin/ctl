@@ -1,0 +1,104 @@
+#!/bin/bash
+set -euo pipefail
+
+JOB_DIR=/var/vcap/jobs/shout
+PKG_DIR=/var/vcap/packages/shout
+RUN_DIR=/var/vcap/sys/run/shout
+LOG_DIR=/var/vcap/sys/log/shout
+STORE_DIR=/var/vcap/store/shout
+PIDFILE=$RUN_DIR/shout.pid
+STOP_TIMEOUT=30
+
+mkdir -p "$RUN_DIR" "$LOG_DIR"
+exec >>"$LOG_DIR/ctl.log" 2>&1
+
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
+
+# running_pid prints the pid from the pidfile when that process is still the
+# Shout! server, so a recycled pid never counts as a running server.
+running_pid() {
+  local pid
+  [[ -s $PIDFILE ]] || return 1
+  pid=$(<"$PIDFILE")
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  [[ $(cat "/proc/$pid/comm" 2>/dev/null) == shout ]] || return 1
+  echo "$pid"
+}
+
+case ${1:-} in
+  start)
+    if pid=$(running_pid); then
+      log "shout is already running (pid $pid)"
+      exit 0
+    fi
+    rm -f "$PIDFILE"
+
+    # Persistent state lives on the persistent disk and belongs to vcap.
+    mkdir -p "$STORE_DIR"
+    chown vcap:vcap "$STORE_DIR"
+    chmod 0750 "$STORE_DIR"
+    for f in "$STORE_DIR/shout.db" "$STORE_DIR/shout.db.tmp"; do
+      if [[ -e $f ]]; then chown vcap:vcap "$f"; fi
+    done
+
+    # The Lisp server stored its state as a JSON list, and the Go server
+    # refuses to start on anything but a JSON object keyed by topic.  Keep
+    # such a file, and an empty one, beside the new state instead of letting
+    # it block the start.  Any other unreadable file still stops the server,
+    # so real state is never discarded silently.
+    db=$STORE_DIR/shout.db
+    if [[ -f $db ]]; then
+      first=$(awk 'match($0, /[^ \t\r]/) { print substr($0, RSTART, 1); exit }' "$db")
+      if [[ $first == "[" || ! -s $db ]]; then
+        aside="$db.unreadable-$(date -u +%Y%m%dT%H%M%SZ)"
+        mv "$db" "$aside"
+        log "moved state that the Go server cannot read (a Lisp-era list or an empty file) to $aside"
+      fi
+    fi
+
+    # The environment file holds credentials and is only read here, as root.
+    chown root:root "$JOB_DIR/config/env"
+    chmod 0600 "$JOB_DIR/config/env"
+    # The server reads the rules and the TLS key itself, as vcap.
+    for f in rules.yml tls.crt tls.key; do
+      chown root:vcap "$JOB_DIR/config/$f"
+      chmod 0640 "$JOB_DIR/config/$f"
+    done
+
+    # shellcheck disable=SC1091
+    source "$JOB_DIR/config/env"
+
+    log "starting shout (pid $$)"
+    echo $$ >"$PIDFILE"
+    exec setpriv --reuid=vcap --regid=vcap --init-groups --no-new-privs -- \
+      "$PKG_DIR/bin/shout" >>"$LOG_DIR/shout.log" 2>&1
+    ;;
+
+  stop)
+    if ! pid=$(running_pid); then
+      log "shout is not running"
+      rm -f "$PIDFILE"
+      exit 0
+    fi
+
+    # SIGTERM lets the server finish in-flight requests and save its state.
+    log "sending SIGTERM to shout (pid $pid)"
+    kill -TERM "$pid" 2>/dev/null || true
+    for ((i = 0; i < STOP_TIMEOUT * 10; i++)); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      log "shout did not stop within ${STOP_TIMEOUT}s; sending SIGKILL"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+    log "shout stopped"
+    ;;
+
+  *)
+    echo "Usage: ctl {start|stop}" >&2
+    exit 1
+    ;;
+esac
