@@ -7,10 +7,9 @@ RUN_DIR=/var/vcap/sys/run/shout
 LOG_DIR=/var/vcap/sys/log/shout
 STORE_DIR=/var/vcap/store/shout
 PIDFILE=$RUN_DIR/shout.pid
-STOP_TIMEOUT=30
-
-mkdir -p "$RUN_DIR" "$LOG_DIR"
-exec >>"$LOG_DIR/ctl.log" 2>&1
+# monit allows its stop program 30 seconds, so ctl sends SIGKILL well before
+# monit gives up on it.
+STOP_TIMEOUT=20
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
@@ -26,79 +25,132 @@ running_pid() {
   echo "$pid"
 }
 
-case ${1:-} in
-  start)
-    if pid=$(running_pid); then
-      log "shout is already running (pid $pid)"
-      exit 0
-    fi
-    rm -f "$PIDFILE"
+# prepare_store readies the persistent state for the server, which runs as
+# vcap.  The server converts a Lisp-era state file in place at startup
+# (keeping the original as shout.db.lisp-<timestamp>) and refuses to start on
+# a file it cannot parse, so ctl asks the server's read-only probe about the
+# file first and sets it aside only when the probe says the server would
+# refuse it.  That keeps a corrupt file from holding the job in a restart
+# loop without ever discarding state the server can read.
+prepare_store() {
+  local db=$STORE_DIR/shout.db f out rc
+  local -a set_aside
 
-    # Persistent state lives on the persistent disk and belongs to vcap.
-    mkdir -p "$STORE_DIR"
-    chown vcap:vcap "$STORE_DIR"
-    chmod 0750 "$STORE_DIR"
-    for f in "$STORE_DIR/shout.db" "$STORE_DIR/shout.db.tmp"; do
-      if [[ -e $f ]]; then chown vcap:vcap "$f"; fi
-    done
+  mkdir -p "$STORE_DIR"
+  chown vcap:vcap "$STORE_DIR"
+  chmod 0750 "$STORE_DIR"
 
-    # The Lisp server stored its state as a JSON list, and the Go server
-    # refuses to start on anything but a JSON object keyed by topic.  Keep
-    # such a file, and an empty one, beside the new state instead of letting
-    # it block the start.  Any other unreadable file still stops the server,
-    # so real state is never discarded silently.
-    db=$STORE_DIR/shout.db
-    if [[ -f $db ]]; then
-      first=$(awk 'match($0, /[^ \t\r]/) { print substr($0, RSTART, 1); exit }' "$db")
-      if [[ $first == "[" || ! -s $db ]]; then
-        aside="$db.unreadable-$(date -u +%Y%m%dT%H%M%SZ)"
-        mv "$db" "$aside"
-        log "moved state that the Go server cannot read (a Lisp-era list or an empty file) to $aside"
+  # The Lisp server wrote shout.tmp before renaming it over shout.db, so a
+  # leftover one is an interrupted write that nothing reads.
+  rm -f "$STORE_DIR/shout.tmp"
+
+  # A full disk or an interrupted write can leave an empty shout.db, which
+  # holds no state, so remove it rather than set it aside.
+  if [[ -f $db ]] && ! grep -q '[^[:space:]]' "$db"; then
+    rm -f "$db"
+    log "removed an empty shout.db, which holds no state"
+  fi
+
+  if [[ -e $db ]]; then
+    # The probe exits 0 for a file the server reads or converts, 3 for a file
+    # in neither format, and 1 when it cannot read the file at all.
+    if out=$("$PKG_DIR/bin/shout" -check-state --db="$db" 2>&1); then rc=0; else rc=$?; fi
+    case $rc in
+      0)
+        if [[ -n $out ]]; then log "$out"; fi
+        ;;
+      3)
+        f=$db.unreadable-$(date -u +%Y%m%dT%H%M%SZ)
+        mv "$db" "$f"
+        log "$out"
+        log "moved $db to $f because the server cannot read it; the server starts with empty state"
+        ;;
+      *)
+        log "$out"
+        log "could not check $db (probe exit $rc), so shout is not started and nothing was moved"
+        return 1
+        ;;
+    esac
+  fi
+
+  for f in "$db" "$db.tmp"; do
+    if [[ -e $f ]]; then chown vcap:vcap "$f"; fi
+  done
+
+  # Point at set-aside state on every start, so that it is restored or
+  # removed on purpose rather than forgotten.
+  shopt -s nullglob
+  set_aside=("$db".unreadable-*)
+  shopt -u nullglob
+  if ((${#set_aside[@]} > 0)); then
+    log "found state that was set aside because the server could not read it: ${set_aside[*]}; stop the job and restore or delete these files"
+  fi
+}
+
+main() {
+  case ${1:-} in
+    start)
+      if pid=$(running_pid); then
+        log "shout is already running (pid $pid)"
+        exit 0
       fi
-    fi
-
-    # The environment file holds credentials and is only read here, as root.
-    chown root:root "$JOB_DIR/config/env"
-    chmod 0600 "$JOB_DIR/config/env"
-    # The server reads the rules and the TLS key itself, as vcap.
-    for f in rules.yml tls.crt tls.key; do
-      chown root:vcap "$JOB_DIR/config/$f"
-      chmod 0640 "$JOB_DIR/config/$f"
-    done
-
-    # shellcheck disable=SC1091
-    source "$JOB_DIR/config/env"
-
-    log "starting shout (pid $$)"
-    echo $$ >"$PIDFILE"
-    exec setpriv --reuid=vcap --regid=vcap --init-groups --no-new-privs -- \
-      "$PKG_DIR/bin/shout" >>"$LOG_DIR/shout.log" 2>&1
-    ;;
-
-  stop)
-    if ! pid=$(running_pid); then
-      log "shout is not running"
       rm -f "$PIDFILE"
-      exit 0
-    fi
 
-    # SIGTERM lets the server finish in-flight requests and save its state.
-    log "sending SIGTERM to shout (pid $pid)"
-    kill -TERM "$pid" 2>/dev/null || true
-    for ((i = 0; i < STOP_TIMEOUT * 10; i++)); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.1
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      log "shout did not stop within ${STOP_TIMEOUT}s; sending SIGKILL"
-      kill -KILL "$pid" 2>/dev/null || true
-    fi
-    rm -f "$PIDFILE"
-    log "shout stopped"
-    ;;
+      # A failure here stops ctl through set -e, which an if would disable.
+      prepare_store
 
-  *)
-    echo "Usage: ctl {start|stop}" >&2
-    exit 1
-    ;;
-esac
+      # The environment file holds credentials and is only read here, as root.
+      chown root:root "$JOB_DIR/config/env"
+      chmod 0600 "$JOB_DIR/config/env"
+      # The server reads the rules and the TLS key itself, as vcap.
+      for f in rules.yml tls.crt tls.key; do
+        chown root:vcap "$JOB_DIR/config/$f"
+        chmod 0640 "$JOB_DIR/config/$f"
+      done
+
+      # shellcheck disable=SC1091
+      source "$JOB_DIR/config/env"
+
+      log "starting shout (pid $$)"
+      echo $$ >"$PIDFILE"
+      # --clear-groups leaves vcap's primary group as the only group, so the
+      # server cannot read files that vcap reaches through groups such as adm.
+      exec setpriv --reuid=vcap --regid=vcap --clear-groups --no-new-privs -- \
+        "$PKG_DIR/bin/shout" >>"$LOG_DIR/shout.log" 2>&1
+      ;;
+
+    stop)
+      if ! pid=$(running_pid); then
+        log "shout is not running"
+        rm -f "$PIDFILE"
+        exit 0
+      fi
+
+      # SIGTERM lets the server finish in-flight requests and save its state.
+      log "sending SIGTERM to shout (pid $pid)"
+      kill -TERM "$pid" 2>/dev/null || true
+      for ((i = 0; i < STOP_TIMEOUT * 10; i++)); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        log "shout did not stop within ${STOP_TIMEOUT}s; sending SIGKILL"
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+      rm -f "$PIDFILE"
+      log "shout stopped"
+      ;;
+
+    *)
+      echo "Usage: ctl {start|stop}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+# The specs source this file to test its functions, so only act when run.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  mkdir -p "$RUN_DIR" "$LOG_DIR"
+  exec >>"$LOG_DIR/ctl.log" 2>&1
+  main "$@"
+fi

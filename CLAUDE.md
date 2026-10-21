@@ -33,7 +33,7 @@ Installs the `shout/shout-linux-amd64` blob as `bin/shout` and runs `shout -vers
 
 - **`monit`** watches the pidfile that `bin/ctl` writes.
 
-- **`templates/bin/ctl`** prepares the store and file permissions, sources `config/env`, and execs the server through `setpriv --reuid=vcap --regid=vcap --init-groups --no-new-privs`. Never use `chpst`, because ubuntu-resolute stemcells do not ship runit. It moves a Lisp-era or empty state file aside, because the Go server refuses to start on one.
+- **`templates/bin/ctl`** prepares the store and file permissions, sources `config/env`, and execs the server through `setpriv --reuid=vcap --regid=vcap --clear-groups --no-new-privs`. Never use `chpst`, because ubuntu-resolute stemcells do not ship runit, and keep `--clear-groups`, because `--init-groups` would hand the server vcap's supplementary groups. The server converts a Lisp-era state file itself, so ctl must not touch one. Before each start ctl runs `shout -check-state --db=<path>` and moves the file aside only when that probe exits 3, which means the server would refuse the file. It stops without moving anything on any other failure, and it deletes an empty file. The specs source ctl, so its top level must stay limited to the `main` guard.
 
 - **`templates/bin/post-start`** waits for `GET /info` to answer.
 
@@ -52,7 +52,7 @@ Installs the `shout/shout-linux-amd64` blob as `bin/shout` and runs `shout -vers
 | `/var/vcap/packages/shout/bin/shout` | Shout! binary |
 | `/var/vcap/jobs/shout/config/rules.yml` | Notification rules, loaded at start |
 | `/var/vcap/jobs/shout/config/env` | Server environment, root-only |
-| `/var/vcap/store/shout/shout.db` | Persistent state, saved once a minute |
+| `/var/vcap/store/shout/shout.db` | Persistent state, saved once a minute and on stop |
 | `/var/vcap/sys/log/shout/shout.log` | Server output |
 | `/var/vcap/sys/log/shout/ctl.log` | Start and stop messages |
 | `/var/vcap/sys/run/shout/shout.pid` | PID file |

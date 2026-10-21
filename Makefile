@@ -18,7 +18,7 @@ upload-blobs:
 
 # Run the job template tests
 spec:
-	rspec
+	bundle exec rspec
 
 # Create a BOSH dev release
 release:

@@ -49,7 +49,8 @@ fi
 
 vcs_id=$(git -C "$repo" log -n 1 --format=%h)
 vcs_date=$(TZ=UTC0 git -C "$repo" log -n 1 --date=iso-strict-local --format=%cd)
-vcs_url=$(git -C "$repo" config --get remote.origin.url || true)
+# The URL is stamped into the binary, so drop any user or token from it.
+vcs_url=$(git -C "$repo" config --get remote.origin.url | sed -E 's#://[^/@]+@#://#' || true)
 # The build date is the commit date so that rebuilding one commit with one
 # Go toolchain produces a byte-identical blob.
 build_date=$vcs_date

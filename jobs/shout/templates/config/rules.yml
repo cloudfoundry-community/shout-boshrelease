@@ -8,11 +8,14 @@
   # when a notification is sent.  Error messages name the offending path and
   # never echo values, because rules often carry webhook URLs and tokens.
 
+  # Each handler lists its required arguments and the arguments it reads.
+  # The webhook handler posts every argument as a JSON field, so it accepts
+  # any name, which nil marks.
   handlers = {
-    'slack'     => %w[webhook],
-    'slack-app' => [],
-    'webhook'   => %w[url],
-    'email'     => %w[to],
+    'slack'     => { required: %w[webhook], allowed: %w[webhook text username icon_url color attach] },
+    'slack-app' => { required: [],          allowed: %w[token channel text username icon_url color attach] },
+    'webhook'   => { required: %w[url],     allowed: nil },
+    'email'     => { required: %w[to],      allowed: %w[to subject body] },
   }
   template_fields = %w[Topic OK Status Message Link Meta Vars]
   duration_re = /\A([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+\z/
@@ -30,40 +33,231 @@
     end
   end
 
+  bad_field = lambda do |field, path|
+    hint = template_fields.find { |f| f.downcase == field.downcase }
+    fail_rules.call(path, "template refers to .#{field}, which is not a field" +
+      (hint ? "; use .#{hint} instead" : "; fields are #{template_fields.map { |f| ".#{f}" }.join(', ')}"))
+  end
+
+  # check_template checks the fields that a template reads from its root
+  # context.  Inside with, range, define, and block, dot is rebound to some
+  # other value, so .name there is not checked, while $.Name always refers
+  # to the root and is.  The else branch of with and range runs with the
+  # outer dot again.
   check_template = lambda do |text, path|
+    rebound = [] # one entry per open block, true when it rebinds dot
     text.scan(/\{\{(.*?)\}\}/m).each do |(action)|
-      next if action =~ /\A-?\s*\/\*/
+      action = action.sub(/\A-(?=\s)/, '').sub(/(?<=\s)-\z/, '').strip
+      next if action.start_with?('/*')
       # Drop quoted strings so that dots inside them are not read as fields.
       stripped = action.gsub(/"(?:\\.|[^"\\])*"|`[^`]*`|'(?:\\.|[^'\\])*'/, '""')
-      stripped.scan(/(?:\A|[\s(|,])\.([A-Za-z_][A-Za-z0-9_]*)/).each do |(field)|
-        next if template_fields.include?(field)
-        hint = template_fields.find { |f| f.downcase == field.downcase }
-        fail_rules.call(path, "template refers to .#{field}, which is not a field" +
-          (hint ? "; use .#{hint} instead" : "; fields are #{template_fields.map { |f| ".#{f}" }.join(', ')}"))
+      keyword = stripped[/\A(?:with|range|if|else|end|define|block)\b/]
+      if keyword == 'end'
+        rebound.pop
+        next
+      end
+      if keyword == 'else'
+        rebound[-1] = false unless rebound.empty?
+        keyword = stripped[/\Aelse\s+(with|range|if)\b/, 1]
+      end
+      stripped.scan(/\$\.([A-Za-z_][A-Za-z0-9_]*)/).each do |(field)|
+        bad_field.call(field, path) unless template_fields.include?(field)
+      end
+      unless rebound.any?
+        stripped.scan(/(?:\A|[\s(|,])\.([A-Za-z_][A-Za-z0-9_]*)/).each do |(field)|
+          bad_field.call(field, path) unless template_fields.include?(field)
+        end
+      end
+      case keyword
+      when 'with', 'range', 'define', 'block' then
+        if action.start_with?('else') && !rebound.empty? then rebound[-1] = true else rebound.push(true) end
+      when 'if' then
+        rebound.push(false) unless action.start_with?('else')
       end
     end
   end
 
+  # go_regex_problem reads a pattern the way Go's regexp package does and
+  # returns why Go would refuse it, or nil.  It also builds a copy in which
+  # every Go-only construct is replaced by a plain atom, so that Ruby can then
+  # check the structure (balanced groups and classes) without tripping over
+  # syntax that Go accepts and Ruby does not, such as (?P<name>) and (?s).
+  unsupported = 'lookaround and backreferences are not supported by Go regular expressions'
+  go_escapes = 'aftnrvxdDsSwWpP0'
+  go_escapes_outside_class = 'bBAz'
+  go_regex_problem = lambda do |pat|
+    norm = +''
+    i = 0
+    in_class = false
+    quantified = false # the previous token was a quantifier
+    lazy_allowed = false
+    while i < pat.length
+      c = pat[i]
+      if c == '\\'
+        e = pat[i + 1]
+        return [nil, norm + '\\'] if e.nil? # Ruby reports the trailing backslash
+        quantified = false
+        if e !~ /[[:alnum:]]/
+          norm << '\\' << e
+          i += 2
+        elsif e =~ /[1-7]/ && pat[i + 2] =~ /[0-7]/
+          # Go reads \12 as an octal escape, but \1 alone as a backreference.
+          j = i + 2
+          j += 1 while j < i + 4 && pat[j] =~ /[0-7]/
+          norm << 'x'
+          i = j
+        elsif e =~ /[1-9]/ || e == 'k' || e == 'g'
+          return [unsupported, nil]
+        elsif e == 'Q' && !in_class
+          close = pat.index('\\E', i + 2)
+          norm << 'x'
+          i = close ? close + 2 : pat.length
+        elsif go_escapes.include?(e) || (!in_class && go_escapes_outside_class.include?(e))
+          j = i + 2
+          if 'xpP'.include?(e) && pat[j] == '{'
+            close = pat.index('}', j)
+            return ["has an unterminated \\#{e}{", nil] unless close
+            j = close + 1
+          elsif e == 'x'
+            j += 1 while j < i + 4 && pat[j] =~ /\h/
+          elsif e == 'p' || e == 'P'
+            j += 1
+          elsif e == '0'
+            j += 1 while j < i + 4 && pat[j] =~ /[0-7]/
+          end
+          norm << 'x'
+          i = j
+        else
+          where = in_class ? ' inside a character class' : ''
+          return ["uses \\#{e}#{where}, which Go regular expressions do not support", nil]
+        end
+        next
+      end
+
+      if in_class
+        if c == '[' && pat[i + 1] == ':' && (close = pat.index(':]', i + 2))
+          norm << pat[i..close + 1]
+          i = close + 2
+          next
+        end
+        in_class = false if c == ']'
+        norm << c
+        i += 1
+        next
+      end
+
+      case c
+      when '['
+        in_class = true
+        quantified = false
+        norm << c
+        i += 1
+        if pat[i] == '^'
+          norm << '^'
+          i += 1
+        end
+        if pat[i] == ']'
+          norm << '\\]'
+          i += 1
+        end
+      when '('
+        quantified = false
+        rest = pat[(i + 2)..] || ''
+        if pat[i + 1] != '?'
+          norm << '('
+          i += 1
+        elsif rest =~ /\A<?[=!]/
+          return [unsupported, nil]
+        elsif (m = rest.match(/\AP?<[A-Za-z0-9_]+>/))
+          norm << '(?:'
+          i += 2 + m[0].length
+        elsif (m = rest.match(/\A([imsU]*)(?:-([imsU]*))?([:)])/)) && !(m[1].empty? && m[2].to_s.empty? && m[3] == ')')
+          norm << (m[3] == ':' ? '(?:' : '(?:)')
+          i += 2 + m[0].length
+        else
+          shown = rest[0, rest.start_with?('P') ? 2 : 1]
+          return ["uses (?#{shown}, which Go regular expressions do not support; Go groups are (...), (?:...), (?P<name>...), (?<name>...), and flags from i, m, s, and U", nil]
+        end
+      when '*', '+', '?'
+        if quantified
+          if c == '?' && lazy_allowed
+            lazy_allowed = false
+            norm << c
+            i += 1
+            next
+          end
+          return ['possessive and nested quantifiers are not supported by Go regular expressions', nil]
+        end
+        quantified = true
+        lazy_allowed = true
+        norm << c
+        i += 1
+      when '{'
+        m = pat[i..].match(/\A\{(\d+)(?:,(\d*))?\}/)
+        if m
+          return ['possessive and nested quantifiers are not supported by Go regular expressions', nil] if quantified
+          if m[1].to_i > 1000 || m[2].to_s.to_i > 1000
+            return ['repeat counts above 1000 are not supported by Go regular expressions', nil]
+          end
+          quantified = true
+          lazy_allowed = true
+          norm << m[0]
+          i += m[0].length
+        else
+          quantified = false
+          norm << '\\{'
+          i += 1
+        end
+      else
+        quantified = false
+        norm << c
+        i += 1
+      end
+    end
+    [nil, norm]
+  end
+
   check_regex = lambda do |pattern, path|
+    problem, norm = go_regex_problem.call(pattern)
+    fail_rules.call(path, problem) if problem
     begin
-      Regexp.new(pattern)
+      verbose, $VERBOSE = $VERBOSE, nil
+      Regexp.new(norm)
     rescue RegexpError => e
       fail_rules.call(path, "invalid regular expression (#{e.message.split(':').first})")
-    end
-    if pattern =~ /\(\?<?[=!]/ || pattern =~ /\\[1-9]/
-      fail_rules.call(path, "lookaround and backreferences are not supported by Go regular expressions")
+    ensure
+      $VERBOSE = verbose
     end
   end
 
+  # yaml11_booleans finds plain scalars that Ruby, like the BOSH director,
+  # reads as booleans under YAML 1.1 but the Go server reads as strings under
+  # YAML 1.2, so a match of yes would reach the server as the text "yes".
+  yaml11_booleans = lambda do |node, found|
+    if node.is_a?(Psych::Nodes::Scalar)
+      if node.plain && node.tag.nil? &&
+         (node.value =~ /\A(?:yes|no|on|off)\z/i || (node.value =~ /\A(?:true|false)\z/i && node.value !~ /\A(?:true|false)\z/))
+        found << [node.start_line + 1, node.value]
+      end
+    else
+      (node.children || []).each { |child| yaml11_booleans.call(child, found) }
+    end
+    found
+  end
+
   raw = p('rules')
-  if raw.is_a?(String) && raw.lstrip.start_with?('(')
+  if raw.is_a?(String) && raw.lines.reject { |l| l =~ /\A\s*(?:[#;]|\z)/ }.join.lstrip.start_with?('(')
     raise "rules: the Lisp rules DSL is no longer supported; rewrite the rules in the YAML format of the Go server"
   end
   rules =
     case raw
     when String
       begin
-        YAML.safe_load(raw, aliases: false)
+        loaded = YAML.safe_load(raw, aliases: false)
+        yaml11_booleans.call(Psych.parse(raw), []).each do |line, word|
+          raise "rules: line #{line}: the plain value #{word} is a boolean to the BOSH director but a string to the Go server; write true or false, or quote it if it is meant as text"
+        end
+        loaded
       rescue Psych::Exception => e
         line = e.respond_to?(:line) ? " at line #{e.line}" : ''
         raise "rules: could not be loaded as plain YAML#{line} (#{e.class.name.split('::').last})"
@@ -130,13 +324,15 @@
             fail_rules.call(hpath, "unknown handler; handlers are #{handlers.keys.join(', ')}")
           end
           fail_rules.call(hpath, 'must be a map of arguments') unless args.is_a?(Hash)
+          allowed = handlers[handler][:allowed]
+          check_keys.call(args, hpath, allowed) if allowed
           args.each do |name, value|
             unless value.is_a?(String) || value.is_a?(Numeric) || value == true || value == false
               fail_rules.call("#{hpath}.#{name}", "must be a string, got #{value.class}")
             end
             check_template.call(value, "#{hpath}.#{name}") if value.is_a?(String)
           end
-          required = handlers[handler].dup
+          required = handlers[handler][:required].dup
           required << 'token'   if handler == 'slack-app' && !slack_app_defaults['token']
           required << 'channel' if handler == 'slack-app' && !slack_app_defaults['channel']
           missing = required.reject { |r| args.key?(r) && !args[r].to_s.strip.empty? }

@@ -19,7 +19,7 @@ Then we can talk to it on the standard port, 7109, through the [Concourse resour
 The `shout` job
 ---------------
 
-The job starts the server under monit and drops from root to `vcap` with `setpriv` before the server runs. It keeps topic state in `/var/vcap/store/shout/shout.db`, so the instance group should have a persistent disk.
+The job starts the server under monit and drops from root to `vcap` with `setpriv` before the server runs. The server runs with the `vcap` group only, without vcap's supplementary groups. It keeps topic state in `/var/vcap/store/shout/shout.db`, so the instance group should have a persistent disk. On its first start after an upgrade from release 0.1.0, the server converts the Lisp state file and keeps the original as `shout.db.lisp-<timestamp>`. If the server could not read the file at all, the job moves it to `shout.db.unreadable-<timestamp>` and starts with empty state, and `ci/release_notes.md` explains how to restore it or roll back.
 
 | Property | Default | Description |
 |----------|---------|-------------|
@@ -77,7 +77,7 @@ The blob is built from a checkout of the Go source:
     make spec
     bosh create-release --force
 
-`make shout-blob` refuses a checkout with uncommitted changes, so that the commit stamped into the binary matches what was built. It builds with `CGO_ENABLED=0` and `-trimpath`, and it uses the commit date as the build date, so rebuilding one commit with one Go toolchain gives a byte-identical blob.
+`make spec` runs the job tests through Bundler, so we run `bundle install` once before the first run. `make shout-blob` refuses a checkout with uncommitted changes, so that the commit stamped into the binary matches what was built. It builds with `CGO_ENABLED=0` and `-trimpath`, and it uses the commit date as the build date, so rebuilding one commit with one Go toolchain gives a byte-identical blob.
 
 How Do I Contribute?
 --------------------
