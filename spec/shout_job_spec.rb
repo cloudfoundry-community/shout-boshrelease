@@ -248,6 +248,17 @@ describe 'shout job' do
       }
     end
 
+    it 'accepts a boolean match, which the server reads as an expression' do
+      rules = { 'rules' => [{ 'for' => '*', 'when' => [{ 'match' => true, 'do' => [] }] }] }
+      expect { render('config/rules.yml', base_properties.merge('rules' => rules)) }.not_to raise_error
+    end
+
+    it 'refuses a match that is not a string' do
+      rules = { 'rules' => [{ 'for' => '*', 'when' => [{ 'match' => ['ok'], 'do' => [] }] }] }
+      expect { render('config/rules.yml', base_properties.merge('rules' => rules)) }
+        .to raise_error(/when\[0\]\.match: must be a string expression/)
+    end
+
     it 'refuses a nested argument value' do
       props = base_properties.merge('rules' => valid_rules.sub(/color: .*$/, 'color: { a: b }'))
       expect { render('config/rules.yml', props) }.to raise_error(/slack.color: must be a string/)

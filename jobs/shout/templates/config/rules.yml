@@ -103,8 +103,9 @@
       fail_rules.call(wpath, "must be a map with match, remind, and do keys, got #{w.class}") unless w.is_a?(Hash)
       check_keys.call(w, wpath, %w[match remind do])
 
-      if w.key?('match') && !w['match'].nil? && !w['match'].is_a?(String)
-        fail_rules.call("#{wpath}.match", "must be a string expression or \"*\", got #{w['match'].class}")
+      match = w['match']
+      unless match.nil? || match.is_a?(String) || match == true || match == false
+        fail_rules.call("#{wpath}.match", "must be a string expression or \"*\", got #{match.class}")
       end
 
       if w.key?('remind') && !w['remind'].nil?
